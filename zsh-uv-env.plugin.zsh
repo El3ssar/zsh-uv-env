@@ -42,6 +42,7 @@ _uv_find_venv() {
 
 _uv_activate() {
   local vpath="$1"
+  export VIRTUAL_ENV_DISABLE_PROMPT=1
   # shellcheck disable=SC1090
   source "$vpath/bin/activate"
   typeset -g _UV_AUTO_ACTIVE="$vpath"
