@@ -35,6 +35,7 @@ find_venv() {
 
 # Variable to track if we activated the venv
 typeset -g AUTOENV_ACTIVATED=0
+typeset -g AUTOENV_ACTIVE_PATH=""
 
 # Define arrays for hooks early so they're available throughout the session
 typeset -ga ZSH_UV_ACTIVATE_HOOKS=()
@@ -67,6 +68,9 @@ _run_deactivate_hooks() {
 
 # Function to handle directory changes
 autoenv_chpwd() {
+    # Only in interactive shells
+    [[ -o interactive ]] || return 0
+
     # Don't do anything if a virtualenv is already manually activated
     if is_venv_active && [[ $AUTOENV_ACTIVATED == 0 ]]; then
         return
@@ -74,19 +78,32 @@ autoenv_chpwd() {
 
     local venv_path=$(find_venv)
 
-    if [[ -n "$venv_path" ]]; then
-        # If we found a venv and none is active, activate it
-        if ! is_venv_active; then
-            source "$venv_path/bin/activate"
-            AUTOENV_ACTIVATED=1
-            # Run activation hooks
-            _run_activate_hooks
+
+    if  [[ -n "$venv_path" ]]; then
+        venv_path="${venv_path:A}"
+        # Only (re)activate if path changed or nothing active yet
+        if [[ "$AUTOENV_ACTIVE_PATH" != "$venv_path" ]]; then
+            # Cleanly deactivate previously auto-activated env
+            if [[ $AUTOENV_ACTIVATED == 1 ]] && is_venv_active; then
+                type deactivate &>/dev/null && deactivate
+                _run_deactivate_hooks
+            fi
+            # Source activate while silencing WARN_CREATE_GLOBAL locally
+            if [[ -f "$venv_path/bin/activate" ]]; then
+                emulate -L zsh
+                setopt localoptions no_warn_create_global
+                source "$venv_path/bin/activate"
+                AUTOENV_ACTIVATED=1
+                AUTOENV_ACTIVE_PATH="$venv_path"
+                _run_activate_hooks
+            fi
         fi
     else
         # If no venv found and we activated one before, deactivate it
         if [[ $AUTOENV_ACTIVATED == 1 ]] && is_venv_active; then
-            deactivate
+            type deactivate &>/dev/null && deactivate
             AUTOENV_ACTIVATED=0
+            AUTOENV_ACTIVE_PATH=""
             # Run deactivation hooks
             _run_deactivate_hooks
         fi
@@ -97,7 +114,9 @@ autoenv_chpwd() {
 # A cheaper alternative would be the chpwd hook, but
 # we would miss the case where a venv is created or deleted
 autoload -U add-zsh-hook
+add-zsh-hook chpwd  autoenv_chpwd
 add-zsh-hook precmd autoenv_chpwd
+
 
 # Run once when shell starts
 autoenv_chpwd
