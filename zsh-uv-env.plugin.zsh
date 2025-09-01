@@ -5,6 +5,8 @@
 #   UV_AUTO_SEARCH_UP=false    # if true, search parents for the venv
 
 typeset -g _UV_AUTO_ACTIVE=""
+typeset -g UV_AUTO_VENV_DIR
+typeset -g UV_AUTO_SEARCH_UP
 : ${UV_AUTO_VENV_DIR:=".venv"}
 : ${UV_AUTO_SEARCH_UP:=false}
 
@@ -66,7 +68,7 @@ _uv_on_chpwd() {
     fi
   else
     # No venv in this dir (or above, if enabled) -> deactivate if we enabled one.
-    _uv_deactivate_if_auto()
+    _uv_deactivate_if_auto
   fi
 }
 
