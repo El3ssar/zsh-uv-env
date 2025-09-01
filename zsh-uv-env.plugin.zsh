@@ -1,112 +1,78 @@
-# --- Auto .venv activation for zsh (safe, conventional) ---
-# Behavior knobs (optional)
-typeset -g ZSH_VENV_RESPECT_MANUAL=1     # don't override user-activated envs
+# Auto-activate/deactivate uv virtualenvs on cd.
+# Assumes uv-created venv lives at ".venv" with a standard Python venv layout.
+# Optional config (set in your .zshrc before loading the plugin):
+#   UV_AUTO_VENV_DIR=".venv"   # directory name to look for
+#   UV_AUTO_SEARCH_UP=false    # if true, search parents for the venv
 
-# State
-typeset -g ZSH_VENV_ACTIVE_PATH=""
-typeset -g ZSH_VENV_OLD_PATH=""
-typeset -g ZSH_VENV_OLD_PYTHONHOME_SET=0
-typeset -g ZSH_VENV_OLD_PYTHONHOME=""
+typeset -g _UV_AUTO_ACTIVE=""
+: ${UV_AUTO_VENV_DIR:=".venv"}
+: ${UV_AUTO_SEARCH_UP:=false}
 
-# Find nearest .venv upwards, stopping at $HOME (or / if outside)
-__venv_find() {
-  local dir stop home="$HOME"
-  dir="$PWD"
-  if [[ "$dir" == "$home"* ]]; then stop="$home"; else stop="/"; fi
-  while [[ "$dir" != "$stop" ]]; do
-    if [[ -d "$dir/.venv" ]]; then print -r -- "${dir:A}/.venv"; return 0; fi
-    dir="${dir:h}"
-  done
-  [[ -d "$stop/.venv" ]] && { print -r -- "${stop:A}/.venv"; return 0; }
+_uv_find_venv_here() {
+  local candidate="${PWD}/${UV_AUTO_VENV_DIR}"
+  if [[ -d "$candidate" && -f "$candidate/pyvenv.cfg" && -f "$candidate/bin/activate" ]]; then
+    print -r -- "$candidate"
+    return 0
+  fi
   return 1
 }
 
-# Restore shell env without sourcing deactivate (prompt-safe)
-__venv_env_off() {
-  if [[ -n "$ZSH_VENV_OLD_PATH" ]]; then
-    export PATH="$ZSH_VENV_OLD_PATH"
-    ZSH_VENV_OLD_PATH=""
-  fi
-  if (( ZSH_VENV_OLD_PYTHONHOME_SET )); then
-    export PYTHONHOME="$ZSH_VENV_OLD_PYTHONHOME"
+_uv_find_venv_up() {
+  local dir="$PWD"
+  while true; do
+    local candidate="${dir}/${UV_AUTO_VENV_DIR}"
+    if [[ -d "$candidate" && -f "$candidate/pyvenv.cfg" && -f "$candidate/bin/activate" ]]; then
+      print -r -- "$candidate"
+      return 0
+    fi
+    [[ "$dir" == "/" ]] && return 1
+    dir="${dir:h}"
+  done
+}
+
+_uv_find_venv() {
+  if [[ "$UV_AUTO_SEARCH_UP" == true ]]; then
+    _uv_find_venv_up
   else
-    unset PYTHONHOME
+    _uv_find_venv_here
   fi
-  ZSH_VENV_OLD_PYTHONHOME_SET=0
-  ZSH_VENV_OLD_PYTHONHOME=""
-  unset VIRTUAL_ENV
-  rehash 2>/dev/null || true
 }
 
-
-# Deactivate only if we were the ones who activated it
-__venv_deactivate_if_owned() {
-  if [[ -n "$ZSH_VENV_ACTIVE_PATH" && -n "$VIRTUAL_ENV" && "$VIRTUAL_ENV" == "$ZSH_VENV_ACTIVE_PATH" ]]; then
-    __venv_env_off
-  fi
-  ZSH_VENV_ACTIVE_PATH=""
+_uv_activate() {
+  local vpath="$1"
+  # shellcheck disable=SC1090
+  source "$vpath/bin/activate"
+  typeset -g _UV_AUTO_ACTIVE="$vpath"
 }
 
-# Activate a given .venv path (idempotent, prompt-safe) WITHOUT sourcing activate
-__venv_activate() {
-  local venv="$1"
-  [[ -z "$venv" || ! -d "$venv/bin" ]] && return 1
-
-  # Respect a manually activated env that's not ours
-  if (( ZSH_VENV_RESPECT_MANUAL )) && [[ -n "$VIRTUAL_ENV" && "$VIRTUAL_ENV" != "$ZSH_VENV_ACTIVE_PATH" && "$VIRTUAL_ENV" != "$venv" ]]; then
-    return 0
+_uv_deactivate_if_auto() {
+  # Only deactivate if *we* activated it.
+  if [[ -n "${_UV_AUTO_ACTIVE}" ]]; then
+    # Call deactivate only if it exists in this shell.
+    if typeset -f deactivate >/dev/null 2>&1; then
+      deactivate
+    fi
+    unset _UV_AUTO_ACTIVE
   fi
-
-  # Already active and owned → nothing to do
-  if [[ "$VIRTUAL_ENV" == "$venv" && "$ZSH_VENV_ACTIVE_PATH" == "$venv" ]]; then
-    return 0
-  fi
-
-  # Switch from our previous env if different
-  if [[ -n "$ZSH_VENV_ACTIVE_PATH" && "$ZSH_VENV_ACTIVE_PATH" != "$venv" ]]; then
-    __venv_deactivate_if_owned
-  fi
-
-
-  # Manually "activate": set env vars and PATH; leave prompt untouched
-  ZSH_VENV_OLD_PATH="$PATH"
-  if (( ${+PYTHONHOME} )); then
-    ZSH_VENV_OLD_PYTHONHOME_SET=1
-    ZSH_VENV_OLD_PYTHONHOME="$PYTHONHOME"
-  else
-    ZSH_VENV_OLD_PYTHONHOME_SET=0
-    ZSH_VENV_OLD_PYTHONHOME=""
-  fi
-  unset PYTHONHOME
-  export VIRTUAL_ENV="$venv"
-  case ":$PATH:" in
-    *":$venv/bin:"*) ;;                   # already in PATH
-    *) export PATH="$venv/bin:$PATH" ;;
-  esac
-  rehash 2>/dev/null || true
-  ZSH_VENV_ACTIVE_PATH="$venv"
-  return 0
 }
 
-# Run on directory change
-__venv_chpwd() {
-  [[ -o interactive ]] || return 0
-
-  local found
-  if found="$(__venv_find)"; then
-    found="${found:A}"
-    # Only auto-activate if no env is active or it's a different one
-    if [[ -z "$VIRTUAL_ENV" || "$VIRTUAL_ENV" != "$found" ]]; then
-      __venv_activate "$found" || true
+_uv_on_chpwd() {
+  local new
+  if new="$(_uv_find_venv)"; then
+    # Different venv than the one we auto-activated? switch.
+    if [[ "$new" != "${_UV_AUTO_ACTIVE}" ]]; then
+      _uv_deactivate_if_auto
+      _uv_activate "$new"
     fi
   else
-    __venv_deactivate_if_owned
+    # No venv in this dir (or above, if enabled) -> deactivate if we enabled one.
+    _uv_deactivate_if_auto()
   fi
 }
 
 autoload -U add-zsh-hook
-add-zsh-hook chpwd __venv_chpwd
+add-zsh-hook chpwd _uv_on_chpwd
 
-# Initialize for the current directory on shell start
-__venv_chpwd
+# Optional: if you also want this to fire when you 'z' or 'autojump' etc. change dirs,
+# they already trigger chpwd. No extra hooks needed.
 
