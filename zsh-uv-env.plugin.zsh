@@ -1,7 +1,6 @@
 # --- Auto .venv activation for zsh (safe, conventional) ---
 # Behavior knobs (optional)
 typeset -g ZSH_VENV_RESPECT_MANUAL=1     # don't override user-activated envs
-typeset -g ZSH_VENV_PROMPT_DISABLE=0     # keep your prompt; don't let activate change it
 
 # State
 typeset -g ZSH_VENV_ACTIVE_PATH=""
@@ -23,7 +22,6 @@ __venv_find() {
 __venv_deactivate_if_owned() {
   if [[ -n "$ZSH_VENV_ACTIVE_PATH" && -n "$VIRTUAL_ENV" && "$VIRTUAL_ENV" == "$ZSH_VENV_ACTIVE_PATH" ]]; then
     typeset -f deactivate &>/dev/null && deactivate
-    command -v zle &>/dev/null && zle reset-prompt 2>/dev/null || true
   fi
   ZSH_VENV_ACTIVE_PATH=""
 }
@@ -51,9 +49,7 @@ __venv_activate() {
   # Source activate while silencing WARN_CREATE_GLOBAL locally
   emulate -L zsh
   setopt localoptions no_warn_create_global
-  (( ZSH_VENV_PROMPT_DISABLE )) || export VIRTUAL_ENV_DISABLE_PROMPT
   source "$venv/bin/activate" || return 1
-  command -v zle &>/dev/null && zle reset-prompt 2>/dev/null || true
 
   ZSH_VENV_ACTIVE_PATH="$venv"
   return 0
