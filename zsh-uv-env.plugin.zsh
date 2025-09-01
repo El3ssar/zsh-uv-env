@@ -4,6 +4,9 @@ typeset -g ZSH_VENV_RESPECT_MANUAL=1     # don't override user-activated envs
 
 # State
 typeset -g ZSH_VENV_ACTIVE_PATH=""
+typeset -g ZSH_VENV_OLD_PATH=""
+typeset -g ZSH_VENV_OLD_PYTHONHOME_SET=0
+typeset -g ZSH_VENV_OLD_PYTHONHOME=""
 
 # Find nearest .venv upwards, stopping at $HOME (or / if outside)
 __venv_find() {
@@ -18,18 +21,36 @@ __venv_find() {
   return 1
 }
 
+# Restore shell env without sourcing deactivate (prompt-safe)
+__venv_env_off() {
+  if [[ -n "$ZSH_VENV_OLD_PATH" ]]; then
+    export PATH="$ZSH_VENV_OLD_PATH"
+    ZSH_VENV_OLD_PATH=""
+  fi
+  if (( ZSH_VENV_OLD_PYTHONHOME_SET )); then
+    export PYTHONHOME="$ZSH_VENV_OLD_PYTHONHOME"
+  else
+    unset PYTHONHOME
+  fi
+  ZSH_VENV_OLD_PYTHONHOME_SET=0
+  ZSH_VENV_OLD_PYTHONHOME=""
+  unset VIRTUAL_ENV
+  rehash 2>/dev/null || true
+}
+
+
 # Deactivate only if we were the ones who activated it
 __venv_deactivate_if_owned() {
   if [[ -n "$ZSH_VENV_ACTIVE_PATH" && -n "$VIRTUAL_ENV" && "$VIRTUAL_ENV" == "$ZSH_VENV_ACTIVE_PATH" ]]; then
-    typeset -f deactivate &>/dev/null && deactivate
+    __venv_env_off
   fi
   ZSH_VENV_ACTIVE_PATH=""
 }
 
-# Activate a given .venv path (idempotent, quiet, safe)
+# Activate a given .venv path (idempotent, prompt-safe) WITHOUT sourcing activate
 __venv_activate() {
   local venv="$1"
-  [[ -z "$venv" || ! -f "$venv/bin/activate" ]] && return 1
+  [[ -z "$venv" || ! -d "$venv/bin" ]] && return 1
 
   # Respect a manually activated env that's not ours
   if (( ZSH_VENV_RESPECT_MANUAL )) && [[ -n "$VIRTUAL_ENV" && "$VIRTUAL_ENV" != "$ZSH_VENV_ACTIVE_PATH" && "$VIRTUAL_ENV" != "$venv" ]]; then
@@ -46,11 +67,23 @@ __venv_activate() {
     __venv_deactivate_if_owned
   fi
 
-  # Source activate while silencing WARN_CREATE_GLOBAL locally
-  emulate -L zsh
-  setopt localoptions no_warn_create_global
-  source "$venv/bin/activate" || return 1
 
+  # Manually "activate": set env vars and PATH; leave prompt untouched
+  ZSH_VENV_OLD_PATH="$PATH"
+  if (( ${+PYTHONHOME} )); then
+    ZSH_VENV_OLD_PYTHONHOME_SET=1
+    ZSH_VENV_OLD_PYTHONHOME="$PYTHONHOME"
+  else
+    ZSH_VENV_OLD_PYTHONHOME_SET=0
+    ZSH_VENV_OLD_PYTHONHOME=""
+  fi
+  unset PYTHONHOME
+  export VIRTUAL_ENV="$venv"
+  case ":$PATH:" in
+    *":$venv/bin:"*) ;;                   # already in PATH
+    *) export PATH="$venv/bin:$PATH" ;;
+  esac
+  rehash 2>/dev/null || true
   ZSH_VENV_ACTIVE_PATH="$venv"
   return 0
 }
@@ -62,7 +95,8 @@ __venv_chpwd() {
   local found
   if found="$(__venv_find)"; then
     found="${found:A}"
-    if [[ "$ZSH_VENV_ACTIVE_PATH" != "$found" || "$VIRTUAL_ENV" != "$found" ]]; then
+    # Only auto-activate if no env is active or it's a different one
+    if [[ -z "$VIRTUAL_ENV" || "$VIRTUAL_ENV" != "$found" ]]; then
       __venv_activate "$found" || true
     fi
   else
