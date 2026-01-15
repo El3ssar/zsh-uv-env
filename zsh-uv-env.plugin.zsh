@@ -8,7 +8,7 @@ typeset -g _UV_AUTO_ACTIVE=""
 typeset -g UV_AUTO_VENV_DIR
 typeset -g UV_AUTO_SEARCH_UP
 : ${UV_AUTO_VENV_DIR:=".venv"}
-: ${UV_AUTO_SEARCH_UP:=false}
+: ${UV_AUTO_SEARCH_UP:=true}
 
 _uv_find_venv_here() {
   local candidate="${PWD}/${UV_AUTO_VENV_DIR}"
