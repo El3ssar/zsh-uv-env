@@ -17,18 +17,22 @@ find_venv() {
     fi
 
     while [[ "$current_dir" != "$stop_dir" ]]; do
-        if [[ -d "$current_dir/.venv" ]]; then
-            echo "$current_dir/.venv"
-            return 0
-        fi
+        for _v in .venv venv; do
+            if [[ -d "$current_dir/$_v" && -r "$current_dir/$_v/bin/activate" ]]; then
+                echo "$current_dir/$_v"
+                return 0
+            fi
+        done
         current_dir="$(dirname "$current_dir")"
     done
 
     # Check stop_dir itself
-    if [[ -d "$stop_dir/.venv" ]]; then
-        echo "$stop_dir/.venv"
-        return 0
-    fi
+    for _v in .venv venv; do
+        if [[ -d "$stop_dir/$_v" && -r "$stop_dir/$_v/bin/activate" ]]; then
+            echo "$stop_dir/$_v"
+            return 0
+        fi
+    done
 
     return 1
 }
@@ -75,8 +79,18 @@ autoenv_chpwd() {
     local venv_path=$(find_venv)
 
     if [[ -n "$venv_path" ]]; then
-        # If we found a venv and none is active, activate it
-        if ! is_venv_active; then
+        # If we found a venv, check if it's different from the currently active one
+        if is_venv_active; then
+            # If the found venv is different from the active one, switch to it
+            if [[ "$venv_path" != "$VIRTUAL_ENV" ]]; then
+                deactivate
+                source "$venv_path/bin/activate"
+                AUTOENV_ACTIVATED=1
+                # Run activation hooks
+                _run_activate_hooks
+            fi
+        else
+            # No venv is active, activate the found one
             source "$venv_path/bin/activate"
             AUTOENV_ACTIVATED=1
             # Run activation hooks
