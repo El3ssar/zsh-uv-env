@@ -1,0 +1,113 @@
+name: Sync with upstream
+
+# Keeps this fork up to date with the repo it was forked from:
+#   1. <upstream default branch> here = exact mirror of upstream
+#   2. customs = my personal commits, rebased on top of it
+#
+# customs is this repo's default branch, so this file lives there and the
+# schedule runs from it. If the rebase conflicts, the run fails (GitHub emails
+# you) and an issue is opened when issues are enabled. Resolve it locally:
+#   git fetch upstream && git rebase upstream/<branch> && git push -f
+#
+# Secret SYNC_TOKEN (fine-grained PAT, this repo, Contents + Workflows: RW)
+# is needed to push upstream changes that touch .github/workflows; the
+# built-in GITHUB_TOKEN is never allowed to. Without it everything else works.
+
+on:
+  schedule:
+    - cron: "23 5 * * *" # daily, 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  CUSTOMS: customs
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout customs
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.CUSTOMS }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Fetch upstream
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          read -r repo branch issues < <(gh api "repos/$GITHUB_REPOSITORY" \
+            --jq '"\(.parent.full_name) \(.parent.default_branch) \(.has_issues)"')
+          if [ "$repo" = null ]; then echo "::error::This repo is not a fork"; exit 1; fi
+          printf 'repo=%s\nbranch=%s\nissues=%s\n' "$repo" "$branch" "$issues" >> "$GITHUB_OUTPUT"
+          git remote add upstream "https://github.com/$repo.git"
+          git fetch --no-tags upstream "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Mirror upstream into ${{ steps.up.outputs.branch }}
+        env:
+          BRANCH: ${{ steps.up.outputs.branch }}
+        run: git push --force origin "refs/remotes/upstream/$BRANCH:refs/heads/$BRANCH"
+
+      - name: Rebase customs onto upstream
+        id: rebase
+        env:
+          BRANCH: ${{ steps.up.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "upstream/$BRANCH" HEAD; then
+            echo "Already up to date with upstream/$BRANCH" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git rebase "upstream/$BRANCH"; then
+            git diff --name-only --diff-filter=U | sed 's/^/conflict: /'
+            git rebase --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo "::error::customs conflicts with upstream/$BRANCH, rebase it by hand"
+            exit 1
+          fi
+          git push --force-with-lease="$CUSTOMS:origin/$CUSTOMS" origin "HEAD:$CUSTOMS"
+          {
+            echo "Rebased $CUSTOMS onto upstream/$BRANCH. Personal commits on top:"
+            git log --oneline "upstream/$BRANCH..HEAD" | sed 's/^/    /'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issue on conflict
+        if: failure() && steps.rebase.outputs.conflict == 'true' && steps.up.outputs.issues == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ steps.up.outputs.branch }}
+        run: |
+          title="Rebase of $CUSTOMS onto upstream failed"
+          open=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+            --jq "map(select(.title == \"$title\"))[0].number // empty")
+          if [ -n "$open" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/$open/comments" -f body="Still conflicting: $RUN_URL" --jq .html_url
+          else
+            body=$(printf '%s\n' "Run: $RUN_URL" "" '```bash' \
+              "git fetch upstream && git switch $CUSTOMS" \
+              "git rebase upstream/$BRANCH   # fix conflicts, then: git rebase --continue" \
+              "git push --force-with-lease origin $CUSTOMS" '```')
+            gh api "repos/$GITHUB_REPOSITORY/issues" -f title="$title" -f body="$body" --jq .html_url
+          fi
+
+      # Scheduled workflows get disabled after 60 days without repo activity.
+      # Re-enabling through the API resets that timer.
+      - name: Keep schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/sync-upstream.yml/enable"
