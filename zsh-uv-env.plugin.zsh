@@ -1,117 +1,81 @@
-# Function to check if a virtualenv is already activated
-is_venv_active() {
-    [[ -n "$VIRTUAL_ENV" ]] && return 0
-    return 1
+# Auto-activate/deactivate uv virtualenvs on cd.
+# Assumes uv-created venv lives at ".venv" with a standard Python venv layout.
+# Optional config (set in your .zshrc before loading the plugin):
+#   UV_AUTO_VENV_DIR=".venv"   # directory name to look for
+#   UV_AUTO_SEARCH_UP=false    # if true, search parents for the venv
+
+typeset -g _UV_AUTO_ACTIVE=""
+typeset -g UV_AUTO_VENV_DIR
+typeset -g UV_AUTO_SEARCH_UP
+: ${UV_AUTO_VENV_DIR:=".venv"}
+: ${UV_AUTO_SEARCH_UP:=true}
+
+_uv_find_venv_here() {
+  local candidate="${PWD}/${UV_AUTO_VENV_DIR}"
+  if [[ -d "$candidate" && -f "$candidate/pyvenv.cfg" && -f "$candidate/bin/activate" ]]; then
+    print -r -- "$candidate"
+    return 0
+  fi
+  return 1
 }
 
-# Function to find nearest .venv directory
-find_venv() {
-    local current_dir="$PWD"
-    local home_dir="$HOME"
-    local root_dir="/"
-    local stop_dir="$root_dir"
-
-    # If we're under home directory, stop at home
-    if [[ "$current_dir" == "$home_dir"* ]]; then
-        stop_dir="$home_dir"
+_uv_find_venv_up() {
+  local dir="$PWD"
+  while true; do
+    local candidate="${dir}/${UV_AUTO_VENV_DIR}"
+    if [[ -d "$candidate" && -f "$candidate/pyvenv.cfg" && -f "$candidate/bin/activate" ]]; then
+      print -r -- "$candidate"
+      return 0
     fi
-
-    while [[ "$current_dir" != "$stop_dir" ]]; do
-        for _v in .venv venv; do
-            if [[ -d "$current_dir/$_v" && -r "$current_dir/$_v/bin/activate" ]]; then
-                echo "$current_dir/$_v"
-                return 0
-            fi
-        done
-        current_dir="$(dirname "$current_dir")"
-    done
-
-    # Check stop_dir itself
-    for _v in .venv venv; do
-        if [[ -d "$stop_dir/$_v" && -r "$stop_dir/$_v/bin/activate" ]]; then
-            echo "$stop_dir/$_v"
-            return 0
-        fi
-    done
-
-    return 1
+    [[ "$dir" == "/" ]] && return 1
+    dir="${dir:h}"
+  done
 }
 
-# Variable to track if we activated the venv
-typeset -g AUTOENV_ACTIVATED=0
-
-# Define arrays for hooks early so they're available throughout the session
-typeset -ga ZSH_UV_ACTIVATE_HOOKS=()
-typeset -ga ZSH_UV_DEACTIVATE_HOOKS=()
-
-# Add the hook registration functions
-zsh_uv_add_post_hook_on_activate() {
-    ZSH_UV_ACTIVATE_HOOKS+=("$1")
+_uv_find_venv() {
+  if [[ "$UV_AUTO_SEARCH_UP" == true ]]; then
+    _uv_find_venv_up
+  else
+    _uv_find_venv_here
+  fi
 }
 
-zsh_uv_add_post_hook_on_deactivate() {
-    ZSH_UV_DEACTIVATE_HOOKS+=("$1")
+_uv_activate() {
+  local vpath="$1"
+  export VIRTUAL_ENV_DISABLE_PROMPT=1
+  # shellcheck disable=SC1090
+  source "$vpath/bin/activate"
+  typeset -g _UV_AUTO_ACTIVE="$vpath"
 }
 
-# Function to execute all activation hooks
-_run_activate_hooks() {
-    local hook
-    for hook in "${ZSH_UV_ACTIVATE_HOOKS[@]}"; do
-        eval "$hook"
-    done
-}
-
-# Function to execute all deactivation hooks
-_run_deactivate_hooks() {
-    local hook
-    for hook in "${ZSH_UV_DEACTIVATE_HOOKS[@]}"; do
-        eval "$hook"
-    done
-}
-
-# Function to handle directory changes
-autoenv_chpwd() {
-    # Don't do anything if a virtualenv is already manually activated
-    if is_venv_active && [[ $AUTOENV_ACTIVATED == 0 ]]; then
-        return
+_uv_deactivate_if_auto() {
+  # Only deactivate if *we* activated it.
+  if [[ -n "${_UV_AUTO_ACTIVE}" ]]; then
+    # Call deactivate only if it exists in this shell.
+    if typeset -f deactivate >/dev/null 2>&1; then
+      deactivate
     fi
-
-    local venv_path=$(find_venv)
-
-    if [[ -n "$venv_path" ]]; then
-        # If we found a venv, check if it's different from the currently active one
-        if is_venv_active; then
-            # If the found venv is different from the active one, switch to it
-            if [[ "$venv_path" != "$VIRTUAL_ENV" ]]; then
-                deactivate
-                source "$venv_path/bin/activate"
-                AUTOENV_ACTIVATED=1
-                # Run activation hooks
-                _run_activate_hooks
-            fi
-        else
-            # No venv is active, activate the found one
-            source "$venv_path/bin/activate"
-            AUTOENV_ACTIVATED=1
-            # Run activation hooks
-            _run_activate_hooks
-        fi
-    else
-        # If no venv found and we activated one before, deactivate it
-        if [[ $AUTOENV_ACTIVATED == 1 ]] && is_venv_active; then
-            deactivate
-            AUTOENV_ACTIVATED=0
-            # Run deactivation hooks
-            _run_deactivate_hooks
-        fi
-    fi
+    unset _UV_AUTO_ACTIVE
+  fi
 }
 
-# Register precmd hook to watch for new venv creation
-# A cheaper alternative would be the chpwd hook, but
-# we would miss the case where a venv is created or deleted
+_uv_on_chpwd() {
+  local new
+  if new="$(_uv_find_venv)"; then
+    # Different venv than the one we auto-activated? switch.
+    if [[ "$new" != "${_UV_AUTO_ACTIVE}" ]]; then
+      _uv_deactivate_if_auto
+      _uv_activate "$new"
+    fi
+  else
+    # No venv in this dir (or above, if enabled) -> deactivate if we enabled one.
+    _uv_deactivate_if_auto
+  fi
+}
+
 autoload -U add-zsh-hook
-add-zsh-hook precmd autoenv_chpwd
+add-zsh-hook chpwd _uv_on_chpwd
 
-# Run once when shell starts
-autoenv_chpwd
+# Optional: if you also want this to fire when you 'z' or 'autojump' etc. change dirs,
+# they already trigger chpwd. No extra hooks needed.
+
